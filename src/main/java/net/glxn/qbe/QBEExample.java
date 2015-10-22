@@ -29,7 +29,7 @@ public class QBEExample<T, E> {
 	private final QueryBuilder<T, E> queryBuilder;
 
 	QBEExample(T example, Class<E> entityClass, EntityManager entityManager) {
-		queryBuilder = new QueryBuilder<T, E>(example, entityClass, entityManager, Matching.EXACT, Junction.UNION,
+		queryBuilder = new QueryBuilderT49<T, E>(example, entityClass, entityManager, Matching.EXACT, Junction.UNION,
 				Case.SENSITIVE);
 	}
 
@@ -137,5 +137,20 @@ public class QBEExample<T, E> {
 	public int getTotalCount() {
 		return ((Long) queryBuilder.buildCount(includeNonString).getSingleResult()).intValue();
 	}
+
+	public E first() {
+		List<E> list = queryBuilder.build(includeNonString).setFirstResult(0).setMaxResults(1).getResultList();
+		if (list == null || list.isEmpty())
+			return null;
+		return list.get(0);
+	}
+
+	public E randomItem() {
+		List<E> list = queryBuilder.buildRandom(includeNonString).setFirstResult(0).setMaxResults(1).getResultList();
+		if (list == null || list.isEmpty())
+			return null;
+		return list.get(0);
+	}
+
 
 }
