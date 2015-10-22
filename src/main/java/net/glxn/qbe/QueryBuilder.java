@@ -15,21 +15,34 @@ import static java.lang.String.*;
 import static net.glxn.qbe.reflection.Reflection.*;
 
 public class QueryBuilder<T, E> {
+	static HashMap<String, HashMap> cache = new HashMap();
+
 	private final Logger log = LoggerFactory.getLogger(this.getClass());
-	private final T example;
 	private final Class<E> entityClass;
+	// private final E entity;
+	private final T example;
+	// private HashMap<String, Field> entityColumnFields = new HashMap<String,
+	// Field>();
+	// private HashMap<String, String> entityColumnName = new HashMap<String,
+	// String>();
+	private HashMap<String, Field> entityColumnFields = null;
+	private HashMap<String, String> entityColumnName = null;
+	// private HashMap<String, Field> entityIdFields;
+	private HashMap<String, Object> exampleFields = new HashMap<String, Object>();
+	List<Predicate> criteria = new ArrayList<Predicate>();
+
 	private final EntityManager entityManager;
 	private CriteriaBuilder cb;
 	private CriteriaQuery<E> criteriaQuery;
 	private Root<E> root;
-	private HashMap<Field, Object> exampleFields;
+	private boolean includeNonString = false;
 
 	private final LinkedList<QBEOrder> ordering = new LinkedList<QBEOrder>();
 	Matching matching;
 	Junction junction;
 	Case caseQuery;
 
-	QueryBuilder(T example, Class<E> entityClass, EntityManager entityManager, Matching matching, Junction junction,
+	QueryBuilderT49(T example, Class<E> entityClass, EntityManager entityManager, Matching matching, Junction junction,
 			Case caseQuery) {
 		this.example = example;
 		this.entityClass = entityClass;
@@ -37,31 +50,172 @@ public class QueryBuilder<T, E> {
 		this.matching = matching;
 		this.junction = junction;
 		this.caseQuery = caseQuery;
+
+		if (entityColumnFields == null) {
+			entityColumnFields = cache.get(entityClass.getName() + ":Field");
+			if (entityColumnFields == null) {
+				entityColumnFields = new HashMap<String, Field>();
+				cache.put(entityClass.getName() + ":Field", entityColumnFields);
+			}
+		}
+		if (entityColumnName == null) {
+			entityColumnName = cache.get(entityClass.getName() + ":Name");
+			if (entityColumnName == null) {
+				entityColumnName = new HashMap<String, String>();
+				cache.put(entityClass.getName() + ":Name", entityColumnName);
+			}
+		}
+
+		buildColumnFields(entityClass, null);
+	}
+
+	// private HashMap<String, Field> fieldMapForEntity(Class<E> entityClass) {
+	private void buildColumnFields(Class clazz, String prefix) {
+		if (clazz == null || clazz == Object.class)
+			return;
+		if (entityColumnFields.size() > 0) {
+			return;
+		}
+		if (prefix == null)
+			prefix = "";
+		// HashMap<String, Field> entityFields = new HashMap<String, Field>();
+
+		for (Field field : clazz.getDeclaredFields()) {
+			System.out.println("buildColumnFields:" + field.getName());
+			if (Modifier.isFinal(field.getModifiers()) || Modifier.isStatic(field.getModifiers())) {
+				continue;
+			}
+			// EmbeddedId ann = field.getAnnotation(EmbeddedId.class);
+			// Embedded ann = field.getAnnotation(Embedded.class);
+			// if (ann != null) {
+			Column column = field.getAnnotation(Column.class);
+			if (column != null) {
+				entityColumnFields.put(field.getName(), field);
+				entityColumnName.put(field.getName(), prefix + field.getName());
+				continue;
+			}
+			EmbeddedId ann = field.getAnnotation(EmbeddedId.class);
+			if (ann != null) {
+				buildColumnFields(field.getType(), prefix + field.getName() + ".");
+				continue;
+			}
+			Embedded embedded = field.getAnnotation(Embedded.class);
+			if (embedded != null) {
+				buildColumnFields(field.getType(), prefix + field.getName() + ".");
+				continue;
+			}
+		}
+		return;
+	}
+
+	private void buildExampleFiled(Object example, String prefix) {
+		if (example == null)
+			return;
+		if (prefix == null)
+			prefix = "";
+
+		Class clazz = example.getClass();
+		System.out.println("Strat:" + prefix + ":" + clazz.getName());
+		if (clazz == null || clazz == Object.class)
+			return;
+
+		//////////////
+		// System.out.println("entityFields:" +
+		////////////// Arrays.toString(entityColumnFields.keySet().toArray()));
+		for (Field field : clazz.getDeclaredFields()) {
+			System.out.println("buildExampleFiled:" + field.getName());
+			if (Modifier.isFinal(field.getModifiers()) || Modifier.isStatic(field.getModifiers())) {
+				continue;
+			}
+			field.setAccessible(true);
+			Object value = null;
+			try {
+				value = field.get(example);
+			} catch (IllegalAccessException e) {
+				Object[] args = { field.getName(), example.getClass(), e };
+				System.out.println(String.format("FAILED TO ACCESS FIELD [%s] ON CLASS [%s]. Cause: %s", args));
+			}
+			if (value == null)
+				continue;
+			String name;
+			if ((name = entityColumnName.get(field.getName())) != null) {
+				exampleFields.put(field.getName(), value);
+			} else {
+				buildExampleFiled(value, prefix + field.getName() + ".");
+			}
+
+		}
+		System.out.println("ALL FIELD:" + Arrays.toString(exampleFields.keySet().toArray()));
+		return;
+	}
+
+	public void orderBy(String orderBy, net.glxn.qbe.types.Order order) {
+		Field field = null;
+		String nameOfFieldToOrderBy = null;
+		System.out.println("ORDERBY:" + orderBy);
+		String tokens[] = orderBy.split("\\.");
+		orderBy = tokens[tokens.length - 1];
+
+		String nameId = entityColumnName.get(tokens[tokens.length - 1]);
+		if (nameId != null) {
+			nameOfFieldToOrderBy = nameId;
+		}
+
+		if (nameOfFieldToOrderBy == null) {
+			String message = "" + "Unable to create order parameters for the supplied order by argument [" + orderBy
+					+ "] " + "You must use on of the following: " + "name property of the "
+					+ Column.class.getCanonicalName() + " annotation "
+					+ "or the name of the field on the class you are querying ";
+			throw new OrderCreationException(message);
+		}
+
+		ordering.add(new QBEOrder(nameOfFieldToOrderBy, order));
 	}
 
 	TypedQuery<E> build(boolean includeNonString) {
-		createCriteriaQueryAndRoot();
-		exampleFields = createFieldMapForExample(includeNonString);
+		if (this.includeNonString != includeNonString || (cb == null && root == null)) {
+			createCriteriaQueryAndRoot();
+			// entityColumnFields = buildColumnFields(entityClass, null);
+			this.includeNonString = includeNonString;
+			buildExampleFiled(example, "");
+		}
 		buildCriteria();
-		return createQueryAndSetParameters();
+		addOrderByToCriteria();
+		criteriaQuery.select(root);
+		TypedQuery<E> retult = createQueryAndSetParameters();
+		return retult;
 	}
 
 	public TypedQuery buildCount(boolean includeNonString) {
-		// HashMap<Field, Object> exampleFields = null;
-		if (cb == null && root == null) {
+		if (this.includeNonString != includeNonString || (cb == null && root == null)) {
 			createCriteriaQueryAndRoot();
-			exampleFields = createFieldMapForExample(includeNonString);
-			buildCriteria();
+			// entityColumnFields = buildColumnFields(entityClass, null);
+			this.includeNonString = includeNonString;
+			buildExampleFiled(example, "");
 		}
+		buildCriteria();
 		criteriaQuery.select((Selection<? extends E>) cb.count(root));
-		return createQueryAndSetParameters();
+		TypedQuery<E> retult = createQueryAndSetParameters();
+		return retult;
+	}
+
+	public Query buildRandom(boolean includeNonString2) {
+		if (this.includeNonString != includeNonString || (cb == null && root == null)) {
+			createCriteriaQueryAndRoot();
+			// entityColumnFields = buildColumnFields(entityClass, null);
+			this.includeNonString = includeNonString;
+			buildExampleFiled(example, "");
+		}
+		buildCriteria();
+		javax.persistence.criteria.Order order = cb.asc(cb.function("random", Float.class, null));
+		criteriaQuery.orderBy(order);
+		criteriaQuery.select(root);
+		TypedQuery<E> retult = createQueryAndSetParameters();
+		return retult;
 	}
 
 	private void buildCriteria() {
-		// criteriaQuery.select(root);
-		if (criteriaQuery.getSelection() == null)
-			criteriaQuery.select(root);
-		List<Predicate> criteria = buildCriteriaForFieldsAndMatching(exampleFields);
+		buildCriteriaForFieldsAndMatching();
 		if (criteria.size() == 0) {
 			log.warn("query by example running with no criteria");
 		} else if (criteria.size() == 1) {
@@ -69,15 +223,20 @@ public class QueryBuilder<T, E> {
 		} else {
 			addJunctionCriteria(criteria);
 		}
-		addOrderByToCriteria();
 	}
 
 	private void addOrderByToCriteria() {
 		ArrayList<javax.persistence.criteria.Order> orders = new ArrayList<javax.persistence.criteria.Order>(
 				ordering.size());
+		javax.persistence.criteria.Order order;
 		for (QBEOrder qbeOrder : ordering) {
-			javax.persistence.criteria.Order order;
-			Path<Object> path = root.get(qbeOrder.getOrderBy());
+			String tokens[] = qbeOrder.getOrderBy().split("\\.");
+			System.out.println("QBEORDER:" + qbeOrder.getOrderBy());
+			Path path = root;
+			int i = 0;
+			for (i = 0; i < tokens.length; i++) {
+				path = path.get(tokens[i]);
+			}
 			switch (qbeOrder.getOrder()) {
 			case ASCENDING:
 				order = cb.asc(path);
@@ -93,6 +252,39 @@ public class QueryBuilder<T, E> {
 		if (orders.size() > 0) {
 			criteriaQuery.orderBy(orders);
 		}
+	}
+
+	private void buildCriteriaForFieldsAndMatching() {
+		criteria = new ArrayList<Predicate>();
+
+		for (String name : exampleFields.keySet()) {
+			String nameId = entityColumnName.get(name);
+			Field field = entityColumnFields.get(name);
+			System.out.println("matching:" + ":" + name + ":" + field + ":" + nameId);
+			if (nameId == null || field == null) {
+				String format = "can not do %s matching on field %s of type %s";
+				throw new UnsupportedOperationException(format(format, matching, name, field.getType()));
+			}
+			String[] tokens = nameId.split("\\.");
+			int i = 0;
+
+			Path path = root;
+			for (i = 0; i < tokens.length - 1; i++) {
+				path = path.get(tokens[i]);
+			}
+			path = path.get(tokens[i]);
+
+			if (matching == Matching.EXACT) {
+				criteria.add(cb.equal(path, (Expression<String>) cb.parameter(field.getType(), name)));
+				continue;
+			}
+			if (caseQuery == Case.INSENSITIVE) {
+				criteria.add(cb.like(cb.lower(path), cb.parameter(String.class, field.getName())));
+			} else if (includeNonString || String.class == field.getType()) {
+				criteria.add(cb.like(path, cb.parameter(String.class, field.getName())));
+			}
+		}
+
 	}
 
 	private void addJunctionCriteria(List<Predicate> criteria) {
@@ -128,10 +320,10 @@ public class QueryBuilder<T, E> {
 			wildcardPostfix = "%";
 		}
 
-		for (Field field : exampleFields.keySet()) {
-
+		Object value;
+		for (String name : exampleFields.keySet()) {
+			Field field = entityColumnFields.get(name);
 			Class<?> fieldType = field.getType();
-			Object value;
 
 			log.trace("Setting parameter for field [{}] with type [{}]", field, fieldType);
 
@@ -139,7 +331,7 @@ public class QueryBuilder<T, E> {
 				log.trace("Field [{}] type is identified as a string", field);
 				String valueString;
 
-				valueString = wildcardPrefix + exampleFields.get(field) + wildcardPostfix;
+				valueString = wildcardPrefix + exampleFields.get(name) + wildcardPostfix;
 
 				if (caseQuery == Case.INSENSITIVE) {
 					value = valueString.toLowerCase();
@@ -151,103 +343,59 @@ public class QueryBuilder<T, E> {
 				value = exampleFields.get(field);
 			}
 
-			query.setParameter(field.getName(), value);
+			query.setParameter(name, value);
 		}
 		return query;
 	}
 
-	private List<Predicate> buildCriteriaForFieldsAndMatching(HashMap<Field, Object> fields) {
-		List<Predicate> criteria = new ArrayList<Predicate>();
-		for (Field field : fields.keySet()) {
-			if (matching == Matching.EXACT) {
-				criteria.add(cb.equal(root.get(field.getName()), cb.parameter(field.getType(), field.getName())));
-			} else {
-				if (String.class.equals(field.getType())) {
-					if (caseQuery == Case.INSENSITIVE) {
-						criteria.add(cb.like(cb.lower(root.<String> get(field.getName())),
-								cb.parameter(String.class, field.getName())));
-					} else {
-						criteria.add(cb.like(root.<String> get(field.getName()),
-								cb.parameter(String.class, field.getName())));
-					}
-				} else {
-					String format = "can not do %s matching on field %s of type %s";
-					throw new UnsupportedOperationException(format(format, matching, field.getName(), field.getType()));
-				}
+	public static void main(String[] args) {
+		int test = 0x4;
+		SecuUserRole example = new SecuUserRole();
+		SecuUserRolePK id = new SecuUserRolePK();
+		example.setId(id);
+		// id.setRoleId("AAA");
+		id.setUserId("ZZ");
+		// example.setMaintainUserId("A");
+		EntityManager em = T49JPAPool.getEntitymanager();
+		if ((test & 0x1) != 0) {
+			QBEExample<SecuUserRole, SecuUserRole> util = QBE.using(em).query(SecuUserRole.class).by(example)
+					.use(Matching.END);
+			util.orderBy("maintainUserId", Order.ASCENDING);
+			util.orderBy("id.userId", Order.ASCENDING);
+			List<SecuUserRole> list = util.list();
+			System.out.println("DONE....:" + list);
+		}
+
+		if ((test & 0x2) != 0) {
+			KvSetting e = new KvSetting();
+			e.setKeyId("0");
+			QBEExample<KvSetting, KvSetting> util2 = QBE.using(em).query(KvSetting.class).by(e).use(Matching.EXACT);
+			// QBEExample<KvSetting, KvSetting> util2 =
+			// QBE.using(em).query(KvSetting.class).by(e).use(Matching.END);
+			List<KvSetting> list2 = util2.list();
+			System.out.println("DONE....:" + list2.size());
+			// System.out.println("Select count=" + util2.getTotalCount());
+		}
+		if ((test & 0x04) != 0) {
+			KvSetting e = new KvSetting();
+			QBEExample<KvSetting, KvSetting> util2 = QBE.using(em).query(KvSetting.class).by(e).use(Matching.EXACT);
+			for (int i = 0; i < 10; i++) {
+				KvSetting kv = util2.randomItem();
+				System.out.println("randomid:" + kv.getKeyId());
 			}
+			System.out.println("DONE....:");
+
 		}
-		return criteria;
-	}
-
-	private HashMap<Field, Object> createFieldMapForExample(boolean includeNonString) {
-		exampleFields = new HashMap<Field, Object>();
-
-		HashMap<String, Field> entityFields = fieldMapForEntity(entityClass);
-		Collection<Field> exampleFieldCollection = fields(hierarchy(example.getClass()));
-		for (Field field : exampleFieldCollection) {
-			if (Modifier.isFinal(field.getModifiers()) || Modifier.isStatic(field.getModifiers())) {
-				continue;
+		if ((test & 0x04) != 0) {
+			SecuUserRole e = new SecuUserRole();
+			for (int i = 0; i < 10; i++) {
+				QBEExample<SecuUserRole, SecuUserRole> util2 = QBE.using(em).query(SecuUserRole.class).by(e)
+						.use(Matching.EXACT);
+				SecuUserRole ur = util2.randomItem();
+				System.out.println("randomid:" + ur.getId().getUserId() + ":" + ur.getId().getRoleId());
 			}
-			field.setAccessible(true);
-			Object value = null;
-			try {
-				value = field.get(example);
-			} catch (IllegalAccessException e) {
-				Object[] args = { field.getName(), example.getClass(), e };
-				log.debug("FAILED TO ACCESS FIELD [%s] ON CLASS [%s]. Cause: %s", args);
-			}
-			if (value != null && entityFields.containsKey(field.getName())) {
-				if (includeNonString || String.class.equals(field.getType()))
-					exampleFields.put(field, value);
-			}
+			System.out.println("DONE....:");
+
 		}
-		return exampleFields;
-	}
-
-	private HashMap<String, Field> fieldMapForEntity(Class<E> entityClass) {
-		HashMap<String, Field> entityFields = new HashMap<String, Field>();
-		for (Field field : fields(hierarchy(entityClass))) {
-			entityFields.put(field.getName(), field);
-		}
-		return entityFields;
-	}
-
-	public void orderBy(String orderBy, net.glxn.qbe.types.Order order) {
-		String nameOfFieldToOrderBy = findFieldNameToOrderByForColumnAnnotation(orderBy);
-
-		if (nameOfFieldToOrderBy == null) {
-			nameOfFieldToOrderBy = findFieldNameToOrderByForFieldNameOnClass(orderBy);
-		}
-
-		if (nameOfFieldToOrderBy == null) {
-			String message = "" + "Unable to create order parameters for the supplied order by argument [" + orderBy
-					+ "] " + "You must use on of the following: " + "name property of the "
-					+ Column.class.getCanonicalName() + " annotation "
-					+ "or the name of the field on the class you are querying ";
-			throw new OrderCreationException(message);
-		}
-
-		ordering.add(new QBEOrder(nameOfFieldToOrderBy, order));
-	}
-
-	private String findFieldNameToOrderByForFieldNameOnClass(String orderBy) {
-		String nameOfFieldToOrderBy = null;
-		Field field = fieldMapForEntity(entityClass).get(orderBy);
-		if (field != null) {
-			nameOfFieldToOrderBy = field.getName();
-		}
-		return nameOfFieldToOrderBy;
-	}
-
-	private String findFieldNameToOrderByForColumnAnnotation(String fieldToOrderBy) {
-		String nameOfFieldToOrderBy = null;
-		Collection<Field> fields = fieldsWithAnnotation(Column.class, hierarchy(entityClass));
-		for (Field field : fields) {
-			Column column = field.getAnnotation(Column.class);
-			if (column.name().equals(fieldToOrderBy)) {
-				nameOfFieldToOrderBy = field.getName();
-			}
-		}
-		return nameOfFieldToOrderBy;
 	}
 }
